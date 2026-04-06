@@ -1,0 +1,1190 @@
+================================================================================
+  TICTACTOE ONLINE - FULL PROJECT DESCRIPTION
+  Stack: Django (Python) + TypeScript (React) + MongoDB
+================================================================================
+
+--------------------------------------------------------------------------------
+  OVERVIEW
+--------------------------------------------------------------------------------
+
+This is a real-time multiplayer TicTacToe web application. Two players can sign
+up, sign in, create or join game rooms, and play TicTacToe against each other
+live in the browser. The game state updates instantly for both players using
+WebSocket connections. All user accounts, game rooms, and results are saved
+permanently in a MongoDB database.
+
+The project is split into two main parts:
+  - backend/   : The server side, built with Django (Python)
+  - frontend/  : The client side, built with React and TypeScript
+
+--------------------------------------------------------------------------------
+  HOW TO RUN THE PROJECT
+--------------------------------------------------------------------------------
+
+Step 1: Start MongoDB
+  Run: mongod
+  (MongoDB must be running on localhost port 27017)
+
+Step 2: Start the Backend
+  Open a terminal and run:
+    cd backend
+    python start.py
+  This starts the Daphne ASGI server on port 8000.
+  It handles both normal HTTP requests AND WebSocket connections.
+
+Step 3: Start the Frontend
+  Open another terminal and run:
+    cd frontend
+    npm run dev
+  This starts the Vite development server on port 5173.
+  Open your browser at: http://localhost:5173
+
+Other users on the same network can access the app at:
+  http://<your-ip-address>:5173
+
+================================================================================
+  BACKEND FOLDER STRUCTURE
+================================================================================
+
+backend/
+  start.py                  <-- Entry point to run the server
+  requirements.txt          <-- Python package list
+  config/
+    settings.py             <-- Django configuration file
+  db/
+    models.py               <-- MongoDB database models (User, GameRoom)
+  api/
+    views.py                <-- HTTP request handlers (REST API endpoints)
+    middleware.py           <-- JWT token authentication helper
+  controller/
+    auth_controller.py      <-- Business logic for register and login
+    game_controller.py      <-- Business logic for rooms and game moves
+  routes/
+    urls.py                 <-- URL routing (maps URLs to view functions)
+  servers/
+    asgi.py                 <-- ASGI server setup (HTTP + WebSocket routing)
+    consumers.py            <-- WebSocket handler for the game room
+    lobby_consumer.py       <-- WebSocket handler for the lobby room list
+  utils/
+    auth.py                 <-- Password hashing and JWT token generation
+    game_logic.py           <-- TicTacToe win/draw detection logic
+  src/
+    manage.py               <-- Django management command entry point
+
+
+================================================================================
+  BACKEND FILES - DETAILED DESCRIPTION
+================================================================================
+
+--------------------------------------------------------------------------------
+  backend/start.py
+--------------------------------------------------------------------------------
+This is the file you run to start the entire backend server.
+
+It does the following:
+  1. Adds the backend folder to Python's module search path so all imports work.
+  2. Sets the Django settings module environment variable.
+  3. Starts the Daphne ASGI server on host 0.0.0.0 (all network interfaces)
+     and port 8000.
+
+Why Daphne instead of manage.py runserver?
+  The normal Django development server (manage.py runserver) only supports
+  regular HTTP requests. It cannot handle WebSocket connections at all.
+  Daphne is an ASGI server that supports both HTTP and WebSocket on the same
+  port, which is required for the real-time lobby and game features.
+
+--------------------------------------------------------------------------------
+  backend/config/settings.py
+--------------------------------------------------------------------------------
+This is the main Django configuration file. It controls how the entire backend
+behaves. Key settings explained:
+
+  SECRET_KEY
+    A secret string used by Django for security purposes like signing tokens.
+    In production this should be changed to a random secret value.
+
+  DEBUG = True
+    Enables detailed error messages. Should be False in production.
+
+  ALLOWED_HOSTS = ['*']
+    Allows requests from any hostname or IP address. This is needed so other
+    devices on the network can connect.
+
+  INSTALLED_APPS
+    The list of Django apps and third-party packages that are active:
+    - django.contrib.auth     : Required by the JWT library (simplejwt)
+    - django.contrib.contenttypes : Required by Django internally
+    - django.contrib.staticfiles  : Serves static files
+    - rest_framework          : Django REST Framework for building APIs
+    - corsheaders             : Allows the frontend (port 5173) to call the
+                                backend (port 8000) without browser blocking
+    - channels                : Django Channels for WebSocket support
+    - api                     : Our own API application
+
+  DATABASES with dummy backend
+    We are NOT using a SQL database. MongoDB is used instead via mongoengine.
+    The dummy backend tells Django not to try to connect to any SQL database.
+
+  MIGRATION_MODULES with None values
+    Tells Django to skip SQL migration checks for auth and contenttypes apps
+    since we have no SQL database.
+
+  mongoengine.connect(...)
+    This line actually connects to MongoDB when Django starts up.
+    It connects to the database named "tictactoe" on localhost port 27017.
+
+  REST_FRAMEWORK settings
+    Configures Django REST Framework to use JWT tokens for authentication.
+    Every API request must include a valid Bearer token in the header.
+
+  SIMPLE_JWT settings
+    - ACCESS_TOKEN_LIFETIME: tokens expire after 1 day
+    - REFRESH_TOKEN_LIFETIME: refresh tokens expire after 7 days
+    - AUTH_HEADER_TYPES: tokens must be sent as "Bearer <token>"
+
+  CORS_ALLOW_ALL_ORIGINS = True
+    Allows the React frontend running on port 5173 to make API calls to the
+    Django backend on port 8000 without being blocked by the browser's
+    same-origin security policy.
+
+  CHANNEL_LAYERS with InMemoryChannelLayer
+    This is the message bus that WebSocket consumers use to send messages to
+    each other. InMemoryChannelLayer stores messages in RAM, which is fine
+    for development. In production, Redis would be used instead.
+
+  ASGI_APPLICATION
+    Points Django to the ASGI application defined in servers/asgi.py.
+
+
+--------------------------------------------------------------------------------
+  backend/db/models.py
+--------------------------------------------------------------------------------
+This file defines the two MongoDB database models (called Documents in
+mongoengine). These are the data structures that get saved to MongoDB.
+
+  CLASS: User
+    Represents a registered player account.
+    Fields:
+      username   : The player's display name. Must be unique. Max 50 characters.
+      email      : The player's email address. Must be unique.
+      password   : The player's password stored as a SHA-256 hash (never plain text).
+      created_at : The date and time the account was created. Auto-set.
+
+    Method: to_dict()
+      Converts the User object into a plain Python dictionary so it can be
+      sent as JSON in API responses. Note: the password is NOT included for
+      security reasons.
+
+    MongoDB collection name: "users"
+
+  CLASS: GameRoom
+    Represents a single game session between two players.
+    Fields:
+      room_id      : A short unique 8-character ID like "A3F9B2C1". Used to
+                     identify and share the room.
+      name         : The human-readable name given to the room by the creator.
+                     Example: "Alice's Room"
+      creator      : A reference to the User who created this room.
+      players      : A list of up to 2 User references. The first player is
+                     always the creator and plays as X. The second player
+                     joins later and plays as O.
+      board        : A list of 9 strings representing the 3x3 game board.
+                     Each cell is either '' (empty), 'X', or 'O'.
+                     Index layout:
+                       0 | 1 | 2
+                       3 | 4 | 5
+                       6 | 7 | 8
+      current_turn : A reference to the User whose turn it currently is.
+      winner       : A reference to the User who won. Null if no winner yet
+                     or if the game ended in a draw.
+      status       : The current state of the room. One of:
+                       'waiting'  - Room created, waiting for second player
+                       'active'   - Both players joined, game in progress
+                       'finished' - Game over (someone won or it's a draw)
+      created_at   : When the room was created. Auto-set.
+
+    Method: to_dict()
+      Converts the GameRoom into a dictionary for JSON responses.
+      Resolves all references (creator, players, winner) to their usernames
+      so the frontend receives plain strings, not database IDs.
+
+    MongoDB collection name: "gamerooms"
+
+--------------------------------------------------------------------------------
+  backend/api/middleware.py
+--------------------------------------------------------------------------------
+Contains one function used by all protected API endpoints.
+
+  FUNCTION: get_user_from_token(request)
+    Purpose: Reads the JWT token from the request's Authorization header,
+             validates it, and returns the matching User from MongoDB.
+
+    How it works:
+      1. Reads the "Authorization" header from the HTTP request.
+      2. Checks it starts with "Bearer " - if not, raises an error.
+      3. Extracts the token string after "Bearer ".
+      4. Uses simplejwt's AccessToken class to decode and validate the token.
+      5. Reads the "user_id" claim from inside the token.
+      6. Looks up that user_id in MongoDB.
+      7. Returns the User object if found, or raises AuthenticationFailed.
+
+    This function is called at the start of every protected view function
+    to identify who is making the request.
+
+
+--------------------------------------------------------------------------------
+  backend/api/views.py
+--------------------------------------------------------------------------------
+This file contains all the HTTP API endpoint handler functions. Each function
+receives an HTTP request and returns a JSON response.
+
+  HELPER FUNCTIONS:
+    ok(data, status=200)
+      Returns a successful JSON response in the format:
+        { "success": true, "data": <data> }
+
+    err(msg, status=400)
+      Returns an error JSON response in the format:
+        { "success": false, "error": <message> }
+
+  AUTH ENDPOINTS:
+
+    signup(request)  [POST /api/auth/signup/]
+      Handles new user registration.
+      Reads username, email, password from the request body.
+      Calls register_user() from auth_controller.
+      Returns the new user's info and JWT tokens on success.
+      Returns an error if username or email already exists.
+
+    signin(request)  [POST /api/auth/signin/]
+      Handles user login.
+      Reads username and password from the request body.
+      Calls login_user() from auth_controller.
+      Returns the user's info and JWT tokens on success.
+      Returns 401 error if credentials are wrong.
+
+  GAME ROOM ENDPOINTS:
+
+    create_game_room(request)  [POST /api/rooms/create/]
+      Creates a new game room.
+      Requires a valid JWT token (authenticated users only).
+      Reads optional "name" from request body.
+      Calls create_room() from game_controller.
+      Returns the new room's full details.
+
+    join_game_room(request, room_id)  [POST /api/rooms/<room_id>/join/]
+      Adds the current user to an existing room.
+      Requires authentication.
+      The room_id comes from the URL path.
+      Calls join_room() from game_controller.
+      Returns the updated room details.
+
+    game_move(request, room_id)  [POST /api/rooms/<room_id>/move/]
+      Processes a player's move on the board.
+      Requires authentication.
+      Reads "position" (0-8) from request body.
+      Calls make_move() from game_controller.
+      Returns the updated room/board state.
+
+    room_detail(request, room_id)  [GET /api/rooms/<room_id>/]
+      Returns the current state of a specific room.
+      Requires authentication.
+
+    rooms_list(request)  [GET /api/rooms/]
+      Returns a list of ALL rooms (waiting, active, and finished).
+      Requires authentication.
+      Rooms are ordered newest first.
+
+--------------------------------------------------------------------------------
+  backend/routes/urls.py
+--------------------------------------------------------------------------------
+Maps URL paths to their corresponding view functions.
+
+  URL Patterns:
+    /api/auth/signup/              -> signup view
+    /api/auth/signin/              -> signin view
+    /api/rooms/                    -> rooms_list view
+    /api/rooms/create/             -> create_game_room view
+    /api/rooms/<room_id>/          -> room_detail view
+    /api/rooms/<room_id>/join/     -> join_game_room view
+    /api/rooms/<room_id>/move/     -> game_move view
+
+  The <room_id> in the URL is a variable that gets passed to the view function.
+  For example: /api/rooms/A3F9B2C1/join/ would call join_game_room with
+  room_id = "A3F9B2C1"
+
+
+--------------------------------------------------------------------------------
+  backend/controller/auth_controller.py
+--------------------------------------------------------------------------------
+Contains the business logic for user authentication. These functions are called
+by the view functions in api/views.py.
+
+  FUNCTION: register_user(username, email, password)
+    Purpose: Creates a new user account.
+    Steps:
+      1. Checks if a user with that username already exists in MongoDB.
+         If yes, returns an error "Username already exists".
+      2. Checks if a user with that email already exists.
+         If yes, returns an error "Email already exists".
+      3. Hashes the password using SHA-256 (via hash_password utility).
+      4. Creates and saves the new User document to MongoDB.
+      5. Generates JWT access and refresh tokens for the new user.
+      6. Returns the user data and tokens.
+
+  FUNCTION: login_user(username, password)
+    Purpose: Authenticates an existing user.
+    Steps:
+      1. Looks up the user by username in MongoDB.
+      2. If not found, or if the password does not match the stored hash,
+         returns an error "Invalid credentials".
+      3. Generates new JWT tokens for the user.
+      4. Returns the user data and tokens.
+
+--------------------------------------------------------------------------------
+  backend/controller/game_controller.py
+--------------------------------------------------------------------------------
+Contains all the business logic for game rooms and gameplay. This is the most
+important file in the backend.
+
+  PRIVATE FUNCTION: _broadcast_lobby()
+    Purpose: Sends the updated room list to ALL users currently viewing the
+             lobby page in real time.
+    How it works:
+      1. Gets the channel layer (the in-memory message bus).
+      2. Sends a "lobby_update" message to the "lobby" group.
+      3. Every LobbyConsumer WebSocket connection that is in the "lobby" group
+         will receive this message and forward it to the browser.
+    This is called automatically whenever a room is created, joined, or finished.
+
+  FUNCTION: create_room(creator, name)
+    Purpose: Creates a new game room.
+    Steps:
+      1. Generates a random 8-character room ID (e.g. "A3F9B2C1").
+      2. Sets the room name. If no name given, defaults to "Username's Room".
+      3. Creates the GameRoom document with status "waiting".
+      4. Adds the creator as the first player.
+      5. Sets current_turn to the creator (they go first as X).
+      6. Saves to MongoDB.
+      7. Calls _broadcast_lobby() to notify all lobby viewers.
+      8. Returns the room data.
+
+  FUNCTION: join_room(room_id, user)
+    Purpose: Adds a second player to an existing room.
+    Validation checks:
+      - Room must exist.
+      - Room status must be "waiting" (not already active or finished).
+      - Room must have fewer than 2 players.
+      - The joining user must not already be in the room.
+    Steps:
+      1. Appends the user to the players list.
+      2. Changes room status from "waiting" to "active".
+      3. Saves to MongoDB.
+      4. Calls _broadcast_lobby() to update all lobby viewers.
+      5. Returns the updated room data.
+
+  FUNCTION: make_move(room_id, user, position)
+    Purpose: Processes a player placing their symbol on the board.
+    Validation checks:
+      - Room must exist.
+      - Room status must be "active".
+      - It must be this user's turn (checked via current_turn reference).
+      - Position must be between 0 and 8.
+      - The chosen cell must be empty.
+    Steps:
+      1. Determines the symbol: creator plays X, second player plays O.
+      2. Places the symbol at the given board position.
+      3. Calls check_winner() to see if the game is over.
+      4. If there is a winner or draw:
+           - Sets status to "finished".
+           - If not a draw, sets the winner field to this user.
+           - Calls _broadcast_lobby() to update lobby viewers.
+      5. If game continues:
+           - Switches current_turn to the other player.
+      6. Saves to MongoDB.
+      7. Returns the updated room data.
+
+  FUNCTION: get_room(room_id)
+    Purpose: Fetches a single room by its room_id.
+    Returns the room data or an error if not found.
+
+  FUNCTION: list_all_rooms()
+    Purpose: Returns all game rooms from MongoDB, newest first.
+    Used by both the REST API endpoint and the lobby WebSocket consumer.
+
+
+--------------------------------------------------------------------------------
+  backend/utils/auth.py
+--------------------------------------------------------------------------------
+Utility functions for password security and JWT token generation.
+
+  FUNCTION: hash_password(password)
+    Takes a plain text password string and returns its SHA-256 hash.
+    Example: "mypassword123" -> "ef92b778bafe771207..."
+    Passwords are NEVER stored as plain text in the database.
+
+  FUNCTION: verify_password(password, hashed)
+    Takes a plain text password and a stored hash.
+    Hashes the plain text and compares it to the stored hash using a
+    constant-time comparison (hmac.compare_digest) to prevent timing attacks.
+    Returns True if they match, False otherwise.
+
+  FUNCTION: get_tokens_for_user(user)
+    Creates a JWT token pair (access + refresh) for a given user.
+    The tokens contain custom claims:
+      - user_id: the MongoDB ObjectId of the user as a string
+      - username: the user's username
+    Returns a dictionary with "access" and "refresh" token strings.
+    These tokens are sent to the frontend and stored in localStorage.
+
+  FUNCTION: generate_room_id()
+    Generates a random 8-character uppercase room ID.
+    Uses Python's uuid4() and takes the first 8 characters.
+    Example output: "A3F9B2C1"
+
+--------------------------------------------------------------------------------
+  backend/utils/game_logic.py
+--------------------------------------------------------------------------------
+Contains the pure game logic for determining win/draw conditions.
+
+  CONSTANT: WINNING_COMBOS
+    A list of all 8 possible winning combinations on a TicTacToe board.
+    Each combination is a list of 3 board position indices:
+      Rows:      [0,1,2], [3,4,5], [6,7,8]
+      Columns:   [0,3,6], [1,4,7], [2,5,8]
+      Diagonals: [0,4,8], [2,4,6]
+
+  FUNCTION: check_winner(board)
+    Takes the current board (list of 9 strings) and checks if the game is over.
+    Returns:
+      'X'    - if X has won
+      'O'    - if O has won
+      'draw' - if all 9 cells are filled and no one won
+      None   - if the game is still in progress
+    How it works:
+      1. Loops through all 8 winning combinations.
+      2. For each combination, checks if all 3 cells have the same non-empty value.
+      3. If yes, returns that value ('X' or 'O').
+      4. If no winner found and all cells are filled, returns 'draw'.
+      5. Otherwise returns None (game continues).
+
+--------------------------------------------------------------------------------
+  backend/servers/asgi.py
+--------------------------------------------------------------------------------
+This file defines the ASGI application that Daphne runs. It is the entry point
+that routes incoming connections to the correct handler.
+
+  How it works:
+    1. Adds the backend root directory to Python's path.
+    2. Sets the Django settings module.
+    3. Calls django.setup() to initialize Django.
+    4. Creates a ProtocolTypeRouter that handles two types of connections:
+         'http'      -> Regular HTTP requests go to Django's standard handler,
+                        which then routes them through urls.py to views.py.
+         'websocket' -> WebSocket connections are wrapped in AuthMiddlewareStack
+                        and then routed by URL path:
+                          /ws/lobby/           -> LobbyConsumer
+                          /ws/game/<room_id>/  -> GameConsumer
+
+--------------------------------------------------------------------------------
+  backend/servers/consumers.py  (GameConsumer)
+--------------------------------------------------------------------------------
+Handles real-time WebSocket communication for an active game room.
+Each player in a game room has their own WebSocket connection to this consumer.
+
+  METHOD: connect()
+    Called when a player opens the game page and connects via WebSocket.
+    Steps:
+      1. Reads the room_id from the WebSocket URL path.
+      2. Reads the JWT token from the URL query string (?token=...).
+      3. Validates the token and looks up the user in MongoDB.
+      4. If authentication fails, closes the connection immediately.
+      5. Adds this connection to a channel group named "game_<room_id>".
+         This group is shared by both players in the same room.
+      6. Accepts the WebSocket connection.
+      7. Fetches the current room state and sends it to this player immediately
+         so they see the current board as soon as they connect.
+
+  METHOD: disconnect(code)
+    Called when a player closes the game page or loses connection.
+    Removes this connection from the game group.
+
+  METHOD: receive(text_data)
+    Called when the player sends a message through the WebSocket.
+    Currently handles one message type:
+      type: "move"
+        Reads the "position" field (0-8).
+        Calls make_move() from game_controller.
+        If there is an error (wrong turn, cell taken, etc.), sends an error
+        message back to just this player.
+        If the move is valid, broadcasts the updated room state to ALL players
+        in the game group (both players see the board update simultaneously).
+
+  METHOD: game_update(event)
+    Called when a "game_update" message is sent to the game group.
+    Forwards the room state data to this player's browser.
+
+  METHOD: get_user(token_str)
+    Async helper that validates a JWT token and returns the User from MongoDB.
+
+
+--------------------------------------------------------------------------------
+  backend/servers/lobby_consumer.py  (LobbyConsumer)
+--------------------------------------------------------------------------------
+Handles real-time WebSocket communication for the lobby page.
+Every user viewing the lobby has a WebSocket connection to this consumer.
+
+  METHOD: connect()
+    Called when a user opens the lobby page.
+    Steps:
+      1. Reads and validates the JWT token from the URL query string.
+      2. If authentication fails, closes the connection.
+      3. Adds this connection to the "lobby" channel group.
+         All lobby viewers share this same group.
+      4. Accepts the connection.
+      5. Immediately fetches all rooms from MongoDB and sends them to this
+         user so the room list appears right away.
+
+  METHOD: disconnect(code)
+    Removes this connection from the lobby group when the user leaves.
+
+  METHOD: receive(text_data)
+    Called if the client sends any message (used as a manual refresh trigger).
+    Fetches the latest room list and sends it back to this client.
+
+  METHOD: lobby_update(event)
+    Called when _broadcast_lobby() sends a "lobby_update" message to the group.
+    Forwards the updated room list to this client's browser.
+    This is how all lobby viewers get instant updates when any room changes.
+
+  METHOD: get_user(token_str)
+    Same as in GameConsumer - validates JWT and returns the User.
+
+--------------------------------------------------------------------------------
+  backend/src/manage.py
+--------------------------------------------------------------------------------
+The standard Django management script. Used for running Django commands.
+It adds the backend root to Python's path so all module imports work correctly.
+In this project, you should use start.py instead of manage.py runserver
+because runserver does not support WebSockets.
+
+================================================================================
+  FRONTEND FOLDER STRUCTURE
+================================================================================
+
+frontend/
+  index.html              <-- The single HTML page that loads the React app
+  vite.config.ts          <-- Vite build tool configuration
+  package.json            <-- Node.js dependencies and scripts
+  tsconfig.app.json       <-- TypeScript compiler configuration
+  src/
+    main.tsx              <-- React app entry point
+    App.tsx               <-- Root component with page routing
+    index.css             <-- All global styles for the entire app
+    react-global.d.ts     <-- TypeScript type reference declarations
+  components/
+    SignIn.tsx            <-- Sign In page component
+    SignUp.tsx            <-- Sign Up page component
+    Lobby.tsx             <-- Lobby page component (room list + create/join)
+    Game.tsx              <-- Game page component (live TicTacToe board)
+    Board.tsx             <-- The 3x3 game board UI component
+    PrivateRoute.tsx      <-- Route guard that redirects to sign in if not logged in
+  api/
+    client.ts             <-- Axios HTTP client with JWT auto-attach
+    auth.ts               <-- API calls for sign up and sign in
+    game.ts               <-- API calls for room operations
+  config/
+    api.ts                <-- Base URL and WebSocket URL constants
+  types/
+    index.ts              <-- TypeScript type definitions (interfaces)
+  utils/
+    auth.ts               <-- localStorage helpers for saving/reading auth data
+
+
+================================================================================
+  FRONTEND FILES - DETAILED DESCRIPTION
+================================================================================
+
+--------------------------------------------------------------------------------
+  frontend/src/main.tsx
+--------------------------------------------------------------------------------
+The very first file that runs when the browser loads the app.
+It finds the <div id="root"> element in index.html and mounts the entire
+React application inside it. Wraps everything in React.StrictMode which
+helps catch potential bugs during development.
+
+--------------------------------------------------------------------------------
+  frontend/src/App.tsx
+--------------------------------------------------------------------------------
+The root component that sets up all the page routes using React Router.
+
+  Routes defined:
+    /           -> Redirects to /signin automatically
+    /signin     -> Shows the SignIn page
+    /signup     -> Shows the SignUp page
+    /lobby      -> Shows the Lobby page (protected - must be logged in)
+    /game/:roomId -> Shows the Game page (protected - must be logged in)
+
+  The :roomId in the game route is a URL parameter. For example:
+    /game/A3F9B2C1 would load the game room with ID "A3F9B2C1"
+
+  Protected routes are wrapped in <PrivateRoute> which checks if the user
+  is logged in before allowing access.
+
+--------------------------------------------------------------------------------
+  frontend/src/index.css
+--------------------------------------------------------------------------------
+The single CSS file for the entire application. Uses CSS custom properties
+(variables) for consistent theming throughout.
+
+  Color Theme (Dark Blue):
+    --bg        : #0a0f1e  (darkest background)
+    --bg2       : #0f172a  (card backgrounds)
+    --bg3       : #1e293b  (input backgrounds)
+    --bg4       : #263348  (hover states)
+    --border    : #1e3a5f  (border color)
+    --accent    : #38bdf8  (sky blue - primary color for buttons, highlights)
+    --accent2   : #818cf8  (purple - used in gradients)
+    --green     : #22c55e  (success, active status)
+    --red       : #f87171  (errors, offline indicator)
+    --text      : #e2e8f0  (main text color)
+    --muted     : #64748b  (secondary text)
+    --muted2    : #94a3b8  (tertiary text)
+
+  Sections styled:
+    Auth pages (sign in / sign up cards)
+    Lobby navigation bar
+    Create room and join room cards
+    Room cards grid with status colors
+    Player slots inside room cards
+    Game board and cells
+    Responsive mobile layout
+
+--------------------------------------------------------------------------------
+  frontend/types/index.ts
+--------------------------------------------------------------------------------
+Defines TypeScript interfaces that describe the shape of data used throughout
+the frontend. These ensure type safety and prevent bugs.
+
+  Interface: User
+    id         : MongoDB ObjectId as string
+    username   : Display name
+    email      : Email address
+    created_at : Account creation timestamp
+
+  Interface: AuthTokens
+    access     : Short-lived JWT access token (valid 1 day)
+    refresh    : Long-lived JWT refresh token (valid 7 days)
+
+  Interface: AuthResponse
+    user       : User object
+    tokens     : AuthTokens object
+    (This is what the backend returns after sign in or sign up)
+
+  Interface: GameRoom
+    room_id      : 8-character unique ID like "A3F9B2C1"
+    name         : Human-readable room name
+    creator      : Username of the room creator
+    players      : Array of up to 2 usernames
+    board        : Array of 9 strings ('', 'X', or 'O')
+    current_turn : Username of the player whose turn it is, or null
+    winner       : Username of the winner, or null
+    status       : 'waiting' | 'active' | 'finished'
+    created_at   : Room creation timestamp
+
+  Interface: ApiResponse<T>
+    success    : true or false
+    data       : The response data (type T, varies by endpoint)
+    error      : Error message string (only present when success is false)
+
+
+--------------------------------------------------------------------------------
+  frontend/config/api.ts
+--------------------------------------------------------------------------------
+Defines the URL constants used to connect to the backend.
+
+  BASE_URL = '/api'
+    The base path for all HTTP API calls. Because Vite proxies /api to
+    http://localhost:8000, this works both locally and on the network.
+
+  WS_HOST
+    Reads the current browser's hostname (e.g. "localhost" or "192.168.1.5").
+    This makes WebSocket URLs work correctly whether you're on localhost or
+    accessing from another device on the network.
+
+  WS_LOBBY_URL(token)
+    Returns the WebSocket URL for the lobby connection.
+    Example: ws://localhost:8000/ws/lobby/?token=eyJ...
+
+  WS_GAME_URL(roomId, token)
+    Returns the WebSocket URL for a specific game room.
+    Example: ws://localhost:8000/ws/game/A3F9B2C1/?token=eyJ...
+
+--------------------------------------------------------------------------------
+  frontend/utils/auth.ts
+--------------------------------------------------------------------------------
+Helper functions for storing and reading authentication data in the browser's
+localStorage. localStorage persists data even after the browser is closed.
+
+  CONSTANT: TOKEN_KEY = 'ttt_tokens'
+    The key used to store tokens in localStorage.
+
+  CONSTANT: USER_KEY = 'ttt_user'
+    The key used to store user info in localStorage.
+
+  FUNCTION: saveAuth(tokens, user)
+    Saves both the JWT tokens and user info to localStorage as JSON strings.
+    Called after successful sign in or sign up.
+
+  FUNCTION: getTokens()
+    Reads and parses the stored tokens from localStorage.
+    Returns null if no tokens are stored (user not logged in).
+
+  FUNCTION: getUser()
+    Reads and parses the stored user info from localStorage.
+    Returns null if no user is stored.
+
+  FUNCTION: clearAuth()
+    Removes both tokens and user info from localStorage.
+    Called when the user clicks "Sign Out".
+
+  FUNCTION: isLoggedIn()
+    Returns true if tokens exist in localStorage, false otherwise.
+    Used by PrivateRoute to decide whether to allow access.
+
+--------------------------------------------------------------------------------
+  frontend/api/client.ts
+--------------------------------------------------------------------------------
+Creates and configures the Axios HTTP client used for all API calls.
+
+  axios.create({ baseURL: BASE_URL })
+    Creates an Axios instance with /api as the base URL.
+    All requests made with this client will automatically prepend /api.
+
+  Request Interceptor
+    Before every request is sent, this interceptor runs automatically.
+    It reads the stored JWT access token from localStorage.
+    If a token exists, it adds it to the request header:
+      Authorization: Bearer eyJ...
+    This means every API call is automatically authenticated without
+    needing to manually add the token each time.
+
+--------------------------------------------------------------------------------
+  frontend/api/auth.ts
+--------------------------------------------------------------------------------
+Functions for making authentication API calls to the backend.
+
+  FUNCTION: signUp(username, email, password)
+    Sends a POST request to /api/auth/signup/ with the user's details.
+    Returns the ApiResponse containing user info and JWT tokens.
+
+  FUNCTION: signIn(username, password)
+    Sends a POST request to /api/auth/signin/ with credentials.
+    Returns the ApiResponse containing user info and JWT tokens.
+
+--------------------------------------------------------------------------------
+  frontend/api/game.ts
+--------------------------------------------------------------------------------
+Functions for making game-related API calls to the backend.
+
+  FUNCTION: createRoom(name)
+    POST /api/rooms/create/
+    Creates a new game room with the given name.
+    Returns the new GameRoom data.
+
+  FUNCTION: joinRoom(roomId)
+    POST /api/rooms/<roomId>/join/
+    Joins an existing room by its ID.
+    Returns the updated GameRoom data.
+
+  FUNCTION: getRoom(roomId)
+    GET /api/rooms/<roomId>/
+    Fetches the current state of a specific room.
+
+  FUNCTION: listRooms()
+    GET /api/rooms/
+    Fetches all rooms. (Used as fallback; lobby uses WebSocket instead.)
+
+  FUNCTION: makeMove(roomId, position)
+    POST /api/rooms/<roomId>/move/
+    Submits a move. (Used as fallback; game uses WebSocket instead.)
+
+
+--------------------------------------------------------------------------------
+  frontend/components/PrivateRoute.tsx
+--------------------------------------------------------------------------------
+A route guard component that protects pages from unauthenticated access.
+
+  How it works:
+    Calls isLoggedIn() to check if a JWT token exists in localStorage.
+    If logged in: renders the child component (Lobby or Game page).
+    If NOT logged in: redirects the user to /signin automatically.
+
+  Usage in App.tsx:
+    <PrivateRoute><Lobby /></PrivateRoute>
+    This means if you try to visit /lobby without being logged in,
+    you get sent to /signin instead.
+
+--------------------------------------------------------------------------------
+  frontend/components/SignUp.tsx
+--------------------------------------------------------------------------------
+The user registration page component.
+
+  State variables:
+    form      : Object holding { username, email, password } input values
+    error     : Error message string to display if registration fails
+    loading   : Boolean to show "Creating account..." while request is pending
+
+  FUNCTION: handleSubmit(e)
+    Called when the form is submitted.
+    1. Prevents the default browser form submission behavior.
+    2. Clears any previous error and sets loading to true.
+    3. Calls signUp() API function with the form values.
+    4. If successful: saves auth data to localStorage and navigates to /lobby.
+    5. If failed: displays the error message from the server.
+    6. Always sets loading back to false when done.
+
+  What the user sees:
+    - TicTacToe brand header
+    - Username input field
+    - Email input field
+    - Password input field
+    - "Sign Up" button (shows "Creating account..." while loading)
+    - Error message in red if something goes wrong
+    - Link to Sign In page for existing users
+
+--------------------------------------------------------------------------------
+  frontend/components/SignIn.tsx
+--------------------------------------------------------------------------------
+The user login page component. Very similar structure to SignUp.
+
+  State variables:
+    form      : Object holding { username, password } input values
+    error     : Error message string
+    loading   : Boolean for loading state
+
+  FUNCTION: handleSubmit(e)
+    1. Prevents default form submission.
+    2. Calls signIn() API function.
+    3. If successful: saves auth data and navigates to /lobby.
+    4. If failed: shows error message.
+
+  What the user sees:
+    - TicTacToe brand header
+    - Username input field
+    - Password input field
+    - "Sign In" button
+    - Error message if credentials are wrong
+    - Link to Sign Up page for new users
+
+
+--------------------------------------------------------------------------------
+  frontend/components/Lobby.tsx
+--------------------------------------------------------------------------------
+The main lobby page. This is what users see after signing in. It shows all
+game rooms and lets users create or join rooms.
+
+  State variables:
+    rooms      : Array of GameRoom objects displayed in the grid
+    roomName   : The text typed in the "Room name" input
+    joinId     : The text typed in the "Enter Room ID" input
+    error      : Error message to display
+    connected  : Boolean - true when WebSocket to lobby is connected
+    creating   : Boolean - true while create room request is in progress
+
+  WebSocket Connection (useEffect on mount):
+    Opens a WebSocket connection to ws://<host>:8000/ws/lobby/?token=<jwt>
+    Stores the WebSocket in wsRef so it can be closed on unmount.
+    Event handlers:
+      onopen    : Sets connected = true (green dot appears in nav bar)
+      onmessage : Parses incoming JSON. If type is "lobby_update", updates
+                  the rooms state with the new room list. This triggers a
+                  re-render showing the updated rooms instantly.
+      onclose   : Sets connected = false (dot turns red)
+    Cleanup: closes the WebSocket when the component unmounts (user leaves lobby).
+
+  FUNCTION: handleCreate()
+    Called when "Create Room" button is clicked.
+    1. Validates that roomName is not empty.
+    2. Calls createRoom() API with the room name.
+    3. On success: navigates to /game/<new_room_id>.
+    4. On failure: shows error message.
+
+  FUNCTION: handleJoin(roomId)
+    Called when "Join Game" button on a room card is clicked, or when
+    "Join" button in the join-by-ID form is clicked.
+    1. Calls joinRoom() API with the room ID.
+    2. On success: navigates to /game/<room_id>.
+    3. On failure: shows error message (e.g. "Room is full").
+
+  FUNCTION: handleLogout()
+    Closes the WebSocket connection, clears localStorage auth data,
+    and navigates back to /signin.
+
+  FUNCTION: canJoin(room)
+    Returns true only if ALL of these conditions are met:
+      - Room status is "waiting"
+      - Room has fewer than 2 players
+      - The current user is NOT already in the room
+    This controls whether the "Join Game" button appears on a room card.
+
+  FUNCTION: isMyRoom(room)
+    Returns true if the current user's username is in the room's players list.
+    Used to show "Rejoin" button and highlight the card with a blue border.
+
+  What the user sees:
+    Navigation bar:
+      - "TicTacToe" brand name on the left
+      - Green/red pulsing dot showing live WebSocket connection status
+      - Current username
+      - "Sign Out" button
+
+    Create section (two cards side by side):
+      Left card  - "Create a Room": text input for room name + "Create Room" button
+      Middle     - "or" divider
+      Right card - "Join by ID": text input for room ID + "Join" button
+
+    Rooms section:
+      - "All Rooms" heading with room count badge
+      - If no rooms: empty state with game controller emoji
+      - If rooms exist: responsive grid of room cards
+
+    Each room card shows:
+      - Room name (top left)
+      - Status badge (top right): blue "Waiting", green "In Progress", grey "Finished"
+      - Two player slots showing X/O symbol and username (or "Open slot" if empty)
+      - A fill bar showing 0%, 50%, or 100% based on player count
+      - "1/2 players" or "2/2 players" text
+      - Room ID in monospace font
+      - Creator username
+      - Winner name with trophy emoji (if game finished)
+      - "Join Game" button (only if canJoin is true)
+      - "Rejoin" button (only if you're already in the room and game not finished)
+
+--------------------------------------------------------------------------------
+  frontend/components/Game.tsx
+--------------------------------------------------------------------------------
+The live game page. This is where the actual TicTacToe game is played.
+
+  State variables:
+    room    : The current GameRoom object (board, players, status, etc.)
+    status  : A human-readable status string shown to the player
+
+  WebSocket Connection (useEffect):
+    Opens a WebSocket to ws://<host>:8000/ws/game/<roomId>/?token=<jwt>
+    Event handlers:
+      onopen    : Sets status to "Connected"
+      onmessage : Parses incoming JSON.
+                  If type is "room_state": updates room state and calls
+                  updateStatus() to set the status message.
+                  If type is "error": shows the error message.
+      onclose   : Sets status to "Disconnected"
+      onerror   : Sets status to "Connection error"
+
+  FUNCTION: updateStatus(room)
+    Sets the status message based on the current room state:
+      - status "waiting"  -> "Waiting for opponent..."
+      - status "finished" with winner -> "You won!" or "<name> won!"
+      - status "finished" no winner   -> "It's a draw!"
+      - status "active", your turn    -> "Your turn"
+      - status "active", other's turn -> "<name>'s turn"
+
+  FUNCTION: handleCellClick(index)
+    Called when the player clicks a cell on the board.
+    Sends a WebSocket message to the server:
+      { type: "move", position: <0-8> }
+    Only works if the WebSocket is open.
+
+  Variable: isMyTurn
+    True only when: room status is "active" AND current_turn equals
+    the logged-in user's username.
+    Passed to the Board component to enable/disable clicking.
+
+  What the user sees:
+    - Header with room ID and "Back to Lobby" button
+    - Status text (e.g. "Your turn", "Waiting for opponent...")
+    - Player badges showing both players with their X/O symbols
+      (your badge is highlighted in blue)
+    - The 3x3 game board
+    - "Back to Lobby" button when game is finished
+
+--------------------------------------------------------------------------------
+  frontend/components/Board.tsx
+--------------------------------------------------------------------------------
+A simple presentational component that renders the 3x3 TicTacToe grid.
+
+  Props:
+    board       : Array of 9 strings ('', 'X', 'O')
+    onCellClick : Function called with the cell index when clicked
+    disabled    : Boolean - if true, all cells are unclickable
+
+  Renders 9 buttons in a CSS grid.
+  Each button:
+    - Shows 'X', 'O', or nothing
+    - Has class "x" or "o" for color styling (blue for X, pink for O)
+    - Is disabled if: the disabled prop is true OR the cell is already filled
+    - Has an aria-label for accessibility (e.g. "Cell 1: X")
+
+--------------------------------------------------------------------------------
+  frontend/vite.config.ts
+--------------------------------------------------------------------------------
+Configuration for the Vite development server and build tool.
+
+  plugins: [react()]
+    Enables React JSX transformation and Fast Refresh (hot module replacement).
+
+  server.host: '0.0.0.0'
+    Makes the dev server accessible from other devices on the network,
+    not just localhost.
+
+  server.port: 5173
+    The frontend runs on port 5173.
+
+  server.proxy
+    Configures URL proxying so the frontend can call the backend:
+
+    '/api' proxy:
+      Forwards all /api/* requests to http://localhost:8000
+      The bypass function prevents source files (.ts, .tsx, .js, etc.)
+      from being accidentally proxied to the backend.
+
+    '/ws' proxy:
+      Forwards WebSocket connections starting with /ws to ws://localhost:8000
+      The ws: true option enables WebSocket proxying.
+
+
+================================================================================
+  DATA FLOW - HOW EVERYTHING CONNECTS
+================================================================================
+
+  USER REGISTRATION FLOW:
+    1. User fills in SignUp form and clicks "Sign Up"
+    2. SignUp.tsx calls signUp() in api/auth.ts
+    3. api/auth.ts sends POST /api/auth/signup/ via axios client
+    4. Vite proxy forwards request to Django on port 8000
+    5. Django routes it to signup() view in api/views.py
+    6. signup() calls register_user() in controller/auth_controller.py
+    7. register_user() checks for duplicate username/email in MongoDB
+    8. If unique: hashes password, saves User to MongoDB, generates JWT tokens
+    9. Response travels back: controller -> view -> HTTP -> proxy -> frontend
+    10. SignUp.tsx saves tokens and user to localStorage via saveAuth()
+    11. User is redirected to /lobby
+
+  USER LOGIN FLOW:
+    Same as registration but calls signin() and login_user() instead.
+    No new user is created; existing user is looked up and tokens are issued.
+
+  LOBBY REAL-TIME UPDATE FLOW:
+    1. User navigates to /lobby
+    2. Lobby.tsx opens WebSocket to ws://localhost:8000/ws/lobby/?token=<jwt>
+    3. LobbyConsumer.connect() validates the token, joins "lobby" group
+    4. LobbyConsumer immediately sends all current rooms to this user
+    5. Lobby.tsx receives the message and renders the room cards
+
+    When another user creates a room:
+    6. createRoom() in game_controller.py saves the room to MongoDB
+    7. _broadcast_lobby() sends "lobby_update" to the "lobby" channel group
+    8. ALL connected LobbyConsumers receive this message
+    9. Each LobbyConsumer.lobby_update() forwards it to its WebSocket client
+    10. Every user's Lobby.tsx receives the update and re-renders the room list
+    11. The new room appears on everyone's screen instantly
+
+  GAME PLAY FLOW:
+    1. Player 1 creates a room -> navigates to /game/A3F9B2C1
+    2. Game.tsx opens WebSocket to ws://localhost:8000/ws/game/A3F9B2C1/?token=...
+    3. GameConsumer.connect() validates token, joins "game_A3F9B2C1" group
+    4. GameConsumer sends current room state to Player 1
+    5. Player 1 sees "Waiting for opponent..."
+
+    6. Player 2 joins the room from the lobby
+    7. join_room() changes status to "active" and broadcasts lobby update
+    8. Player 2 navigates to /game/A3F9B2C1
+    9. Player 2's Game.tsx opens its own WebSocket connection
+    10. Both players are now in the "game_A3F9B2C1" channel group
+
+    11. Player 1 clicks a cell (e.g. position 4, the center)
+    12. Game.tsx sends: { type: "move", position: 4 }
+    13. GameConsumer.receive() calls make_move() in game_controller
+    14. make_move() validates the move, places 'X' at position 4
+    15. check_winner() checks if X has won -> not yet
+    16. current_turn switches to Player 2
+    17. Room is saved to MongoDB
+    18. GameConsumer sends "game_update" to "game_A3F9B2C1" group
+    19. BOTH players' GameConsumers receive the update
+    20. BOTH players' Game.tsx components update the board simultaneously
+    21. Player 1 sees "Player 2's turn", Player 2 sees "Your turn"
+
+    22. Game continues until someone wins or all cells are filled
+    23. When game ends: status becomes "finished", winner is saved to MongoDB
+    24. _broadcast_lobby() updates the lobby room list for all viewers
+    25. Both players see the result ("You won!" / "X won!" / "It's a draw!")
+
+================================================================================
+  MONGODB DATABASE STRUCTURE
+================================================================================
+
+  Database name: tictactoe
+
+  Collection: users
+    Each document represents one registered player.
+    Example document:
+    {
+      "_id": ObjectId("..."),
+      "username": "alice",
+      "email": "alice@example.com",
+      "password": "ef92b778bafe771207...",  <- SHA-256 hash
+      "created_at": ISODate("2026-04-05T...")
+    }
+
+  Collection: gamerooms
+    Each document represents one game session.
+    Example document:
+    {
+      "_id": ObjectId("..."),
+      "room_id": "A3F9B2C1",
+      "name": "Alice's Room",
+      "creator": ObjectId("..."),           <- Reference to users collection
+      "players": [ObjectId("..."), ObjectId("...")],
+      "board": ["X", "", "O", "", "X", "", "", "", ""],
+      "current_turn": ObjectId("..."),
+      "winner": null,
+      "status": "active",
+      "created_at": ISODate("2026-04-05T...")
+    }
+
+================================================================================
+  TECHNOLOGY SUMMARY
+================================================================================
+
+  Backend Technologies:
+    Python 3.11        : Programming language
+    Django 5.x         : Web framework
+    Django REST Framework : Tools for building REST APIs
+    djangorestframework-simplejwt : JWT token authentication
+    Django Channels    : WebSocket support for Django
+    Daphne             : ASGI server (runs HTTP + WebSocket)
+    mongoengine        : MongoDB ODM (Object Document Mapper)
+    pymongo            : Low-level MongoDB driver
+    django-cors-headers : Allows cross-origin requests from frontend
+    asgiref            : Async utilities (async_to_sync)
+
+  Frontend Technologies:
+    TypeScript         : Typed JavaScript
+    React 18           : UI component library
+    React Router v6    : Client-side page routing
+    Axios              : HTTP client for API calls
+    Vite               : Fast development server and build tool
+    CSS Custom Properties : Theme variables for consistent styling
+
+  Database:
+    MongoDB            : NoSQL document database
+    Collection: users  : Stores user accounts
+    Collection: gamerooms : Stores game sessions
+
+  Communication Protocols:
+    HTTP REST API      : For auth and room operations (via Axios)
+    WebSocket          : For real-time lobby updates and live gameplay
+
+================================================================================
+  END OF PROJECT DESCRIPTION
+================================================================================
